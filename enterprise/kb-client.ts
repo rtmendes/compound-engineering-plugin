@@ -1,0 +1,1 @@
+// See polsio/enterprise/kb-client.ts for the shared client\n// Import: import EnterpriseKB from '../enterprise/kb-client.js';\nexport { default } from '../../polsio/enterprise/kb-client.js';

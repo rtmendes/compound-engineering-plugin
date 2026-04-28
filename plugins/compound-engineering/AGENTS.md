@@ -92,6 +92,38 @@ Important: Just because the developer's installed plugin may be out of date, it'
 
 **Proof HITL surfaces a ghost "AI collaborator" agent** (noted 2026-04-16, may change): The Proof API auto-joins any header-less `/state` read under a synthetic `ai:auto-<hash>` identity, so docs created by the `skills/proof/` HITL workflow show a phantom participant alongside `Compound Engineering`. The only way to suppress it is to set `ownerId: "agent:ai:compound-engineering"` on create — but that transfers document ownership to the agent and prevents the user from claiming it into their Proof library, so we don't use it. Treat as cosmetic noise; don't reintroduce the `ownerId` workaround. Tracked upstream: https://github.com/EveryInc/proof/issues/951.
 
+## Skill Design Principles
+
+Skills are guardrails for an intelligent agent, not a step-by-step controller for a non-intelligent one. The principles below were learned from real-world testing and should guide future skill edits.
+
+**Calibrate prescription level to the failure mode.** Three rough levels:
+
+- **Hard rules** for deterministic safety (e.g., "don't silently `cd` to another repo and write outputs there"). The agent's judgment must not vary — the failure mode is bad enough that mechanical adherence is right.
+- **Strong guidance with examples** for judgment calls where there's a clear bias to teach (e.g., "name the decision; don't expand it" with bad-vs-good pairs). Concrete examples teach better than abstract principles, but anchor them at the principle level so the agent can generalize.
+- **Trust** for cases where prescription would harm: codebase exploration tactics, how many clarifying questions to ask, when to lean on memory, prose phrasing. Over-prescription robs the agent of intelligence and memory.
+
+Match the level to the failure mode in both directions. Over-prescribing produces rote output; under-prescribing produces inconsistent behavior and drifted artifacts. The right test: can you name a specific bad outcome the prescription prevents? If yes, prescription is justified. If the rule exists "to be safe" without a concrete failure mode, lean toward trust.
+
+**SKILL.md content caches at session start; references load on demand.** Implications:
+
+- For load-bearing rules (those that MUST fire reliably), put strong language at the top of the relevant phase in SKILL.md, not just in the reference. References can be skipped; SKILL.md is always loaded.
+- When the same rule is duplicated across SKILL.md and a reference, both must be updated together. Drift produces confusing agent behavior — the agent follows whichever copy is loaded.
+- Inline content in SKILL.md that describes what's also in a reference makes the reference feel optional ("I have enough from inline"). For references that should always load, minimize the inline alternative or keep it strictly load-instruction-only.
+
+**Split orthogonal decisions into sequential questions.** When a blocking question's options span multiple decision axes (e.g., "where to operate" plus "which skill to use"), users have to reason about both axes simultaneously and individual options end up underspecified. Sequential menus addressing one decision at a time produce clearer interaction shapes — the user resolves one axis, then sees a follow-up for the next. Location vs. skill routing, scope-tier vs. depth, and other multi-axis questions all benefit from this separation.
+
+**Process exhaust stays out of artifacts.** Engineering process metadata — "captured at Phase X.Y" notes, `## Next Steps` pointing to the next skill, italic provenance lines — does not belong in user-facing docs. Doc readers want the doc; they do not need to trace which engineering phase produced which section. Keep skill state in chat (where it is interactive and can be acted on) and durable content in the artifact.
+
+**Distinguish process exhaust from audit content.** Sections that exist for the agent's own bookkeeping are exhaust; sections that exist because downstream readers need to know something about the artifact's authorship are audit content and belong in the doc. The clearest example is non-interactive mode — when no synchronous user confirmed the agent's inferences, those un-validated bets must be visibly labeled in the artifact (e.g., a `## Assumptions` section) so downstream review can scrutinize them as bets rather than mistaking them for user-confirmed decisions. The reader needs that information to do their job; the agent's phase-numbering does not. When evaluating "is this process exhaust?", ask whether removing the section degrades a downstream reader's ability to evaluate the artifact correctly. If yes, it's audit content; keep it.
+
+**Test the spec by running it, not just by reading it.** Real-world test runs surface failure modes that desk review misses: load reliability, plugin caching across sessions, agent interpretation drift, conflation in menu shapes, edge-case interactions with the user's repo layout. When a test reveals unexpected behavior, ask three questions before tightening the spec:
+
+- Is the agent's behavior actually wrong, or is it expressing better judgment than the rule encoded?
+- Did the spec drift between SKILL.md and references such that the agent saw inconsistent rules?
+- Is this load-reliability (rule never reached) or rule-content (rule reached but produces wrong output)?
+
+The fix differs by answer. Sometimes "fix the spec" means loosening over-prescription, not adding more rules. Sometimes the right answer is "accept the variance — the agent's adaptation was correct for the case."
+
 ## Skill Compliance Checklist
 
 When adding or modifying skills, verify compliance with the skill spec:
@@ -193,7 +225,34 @@ Why: shell-heavy exploration causes avoidable permission prompts in sub-agent wo
 - [ ] Never instruct agents to use `find`, `ls`, `cat`, `head`, `tail`, `grep`, `rg`, `wc`, or `tree` through a shell for routine file discovery, content search, or file reading
 - [ ] Describe tools by capability class with platform hints — e.g., "Use the native file-search/glob tool (e.g., Glob in Claude Code)" — not by Claude Code-specific tool names alone
 - [ ] When shell is the only option (e.g., `ast-grep`, `bundle show`, git commands), instruct one simple command at a time — no action chaining (`cmd1 && cmd2`, `cmd1 ; cmd2`) and no error suppression (`2>/dev/null`, `|| true`). Two narrow exceptions: boolean conditions within if/while guards (`[ -n "$X" ] || [ -n "$Y" ]`) are fine — that is normal conditional logic, not action chaining. **Value-producing preparatory commands** (`VAR=$(cmd1) && cmd2 "$VAR"`) are also fine when `cmd2` strictly consumes `cmd1`'s output and splitting would require manually threading the value through model context across bash calls (e.g., `BODY_FILE=$(mktemp -u) && cat > "$BODY_FILE" <<EOF ... EOF`). Simple pipes (e.g., `| jq .field`) and output redirection (e.g., `> file`) are acceptable when they don't obscure failures
-- [ ] **Pre-resolution exception:** `!` backtick pre-resolution commands run at skill load time, not at agent runtime. They may use chaining (`&&`, `||`), error suppression (`2>/dev/null`), and fallback sentinels (e.g., `|| echo '__NO_CONFIG__'`) to produce a clean, parseable value for the model. This is the preferred pattern for environment probes (CLI availability, config file reads) that would otherwise require runtime shell calls with chaining. Example: `` !`command -v codex >/dev/null 2>&1 && echo "AVAILABLE" || echo "NOT_FOUND"` ``
+- [ ] **Pre-resolution exception:** `!` backtick pre-resolution commands run at skill load time, not at agent runtime. They may use chaining (`&&`, `||`), error suppression (`2>/dev/null`), and fallback sentinels (e.g., `|| echo '__NO_CONFIG__'`) to produce a clean, parseable value for the model. This is the preferred pattern for environment probes (CLI availability, config file reads) that would otherwise require runtime shell calls with chaining. Three shapes are rejected by Claude Code's safety check and must be avoided in `!` backticks:
+  - **`case ... esac`** is rejected as `Contains case_statement`. Use `&&` chaining or pipe-to-sed, or extract to a script.
+  - **`[A] && B || C`** (mixing `&&` and `||` at the same lexical depth) is rejected as `ambiguous syntax with command separators` (issue #710). Wrap the `&&` chain in a subshell so only `||` remains at top level — `(A && B) || C` — or emit the raw value and let the agent's prose decide. Example of the safe shape: `` !`(top=$(...); [ -n "$top" ] && cat "$top/file") || echo '__SENTINEL__'` ``
+  - **`$(...)` containing a double-quoted string** (e.g., `basename "$(dirname "$common")"`) is rejected as `Unhandled node type: string` (issue #709). Replace nested `$()` with parameter expansion (`${common%/.git}`), pipe to sed (`| sed -E 's|/\.git/?$||; s|.*/||'`), or extract to a script invoked as `` !`bash "${CLAUDE_SKILL_DIR}/scripts/<name>.sh"` ``.
+
+  When the logic is non-trivial, prefer extracting to a script under the skill's `scripts/` directory; the safety check then sees only `bash <quoted-path>`, which sidesteps both current and future safety-check tightenings. Tests in `tests/skill-shell-safety.test.ts` enforce all three patterns.
+
+  **Permission gate on extracted scripts — invoke from the skill body, not from `!` pre-resolution.** A pre-resolution `bash "${CLAUDE_SKILL_DIR}/scripts/<name>.sh"` form passes the safety check but trips Claude Code's permission check at skill-load time, which does *not* honor `defaultMode: bypassPermissions`. Allow-listing via `allowed-tools` frontmatter is unreliable at *load time*: empirically, broad `Bash(bash *)` patterns appear to load with bypass on but narrow filename-pinned patterns like `Bash(bash *upstream-version.sh)` fail with bypass off. Move the script invocation into the skill body so it runs via the runtime Bash tool instead. Two pieces are required for it to actually work:
+
+  1. **Use `${CLAUDE_SKILL_DIR}` for the script path**, not bare relative paths. The runtime Bash tool runs from the user's project CWD, not the skill directory — `bash scripts/<name>.sh` fails with "No such file or directory" empirically. The `${CLAUDE_SKILL_DIR}` env var resolves correctly across `claude --plugin-dir` and standard marketplace-cached installs.
+  2. **Declare narrow `allowed-tools` patterns** pinned to each script filename. At runtime, `allowed-tools` granting is documented to apply, so users without `bypassPermissions` skip the approval prompt. Pin per filename rather than using broad `Bash(bash *)`.
+
+  ```yaml
+  allowed-tools: Bash(bash *upstream-version.sh), Bash(bash *currently-loaded-version.sh)
+  ```
+
+  ````markdown
+  ## Step 1: Probe X
+
+  Run via the Bash tool, in parallel:
+
+  ```bash
+  bash "${CLAUDE_SKILL_DIR}/scripts/upstream-version.sh"
+  bash "${CLAUDE_SKILL_DIR}/scripts/currently-loaded-version.sh"
+  ```
+  ````
+
+  Use this whenever a `!` pre-resolution would invoke `bash <path>`. Reserve pre-resolution for commands whose first token already matches common user allow rules (`git status`, `gh api`, `cat <path>`, `command -v <name>`).
 - [ ] Do not encode shell recipes for routine exploration when native tools can do the job; encode intent and preferred tool classes instead
 - [ ] For shell-only workflows (e.g., `gh`, `git`, `bundle show`, project CLIs), explicit command examples are acceptable when they are simple, task-scoped, and not chained together
 
@@ -213,9 +272,9 @@ Plugin config lives at `.compound-engineering/config.local.yaml` in the repo roo
 
 2. **Worktrees:** Gitignored files are per-worktree. A config file created in the main checkout does not exist in worktrees. When reading config, fall back to the main repo root if the file is missing in the current worktree:
    ```
-   !`(top=$(git rev-parse --show-toplevel 2>/dev/null); [ -n "$top" ] && cat "$top/.compound-engineering/config.local.yaml" 2>/dev/null) || (common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); [ -n "$common" ] && cat "$(dirname "$common")/.compound-engineering/config.local.yaml" 2>/dev/null) || echo '__NO_CONFIG__'`
+   !`(top=$(git rev-parse --show-toplevel 2>/dev/null); [ -n "$top" ] && cat "$top/.compound-engineering/config.local.yaml" 2>/dev/null) || (common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); main="${common%/.git}"; [ -n "$main" ] && cat "$main/.compound-engineering/config.local.yaml" 2>/dev/null) || echo '__NO_CONFIG__'`
    ```
-   The first subshell tries the current worktree root. The second derives the main repo root from `git-common-dir` as a fallback. The `[ -n "$top" ]` and `[ -n "$common" ]` guards matter: outside a git repo, both `git rev-parse` invocations emit empty, and an unguarded `cat "$(dirname "")/.compound-engineering/config.local.yaml"` would resolve to a CWD-relative `./...config.local.yaml` and could succeed against a stray file in the user's working directory. Guarded, both branches simply fail and the `__NO_CONFIG__` sentinel takes over. In a regular (non-worktree) checkout, both repo paths are identical.
+   The first subshell tries the current worktree root. The second derives the main repo root from `git-common-dir` (stripping the trailing `/.git` with `${common%/.git}`) as a fallback. Use parameter expansion rather than `dirname` because Claude Code's safety check rejects nested `$(dirname "$common")` inside double-quoted strings as "Unhandled node type: string" (see issue #709). The `[ -n "$top" ]` and `[ -n "$main" ]` guards matter: outside a git repo, both `git rev-parse` invocations emit empty, and an unguarded `cat "/.compound-engineering/config.local.yaml"` would attempt to read from `/`. Guarded, both branches simply fail and the `__NO_CONFIG__` sentinel takes over. In a regular (non-worktree) checkout, both repo paths are identical.
 
 If neither path has the file, fall through to defaults — never fail or block on missing config.
 

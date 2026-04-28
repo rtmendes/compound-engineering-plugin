@@ -43,7 +43,7 @@ After extracting tokens from arguments, resolve the delegation state using this 
 3. **Hard default** -- `false` (delegation off)
 
 **Config (pre-resolved):**
-!`(top=$(git rev-parse --show-toplevel 2>/dev/null); [ -n "$top" ] && cat "$top/.compound-engineering/config.local.yaml" 2>/dev/null) || (common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); [ -n "$common" ] && cat "$(dirname "$common")/.compound-engineering/config.local.yaml" 2>/dev/null) || echo '__NO_CONFIG__'`
+!`(top=$(git rev-parse --show-toplevel 2>/dev/null); [ -n "$top" ] && cat "$top/.compound-engineering/config.local.yaml" 2>/dev/null) || (common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null); main="${common%/.git}"; [ -n "$main" ] && cat "$main/.compound-engineering/config.local.yaml" 2>/dev/null) || echo '__NO_CONFIG__'`
 
 If the block above contains YAML key-value pairs, extract values for the keys listed below.
 If it shows `__NO_CONFIG__`, the file does not exist — all settings fall through to defaults.
@@ -101,7 +101,7 @@ Determine how to proceed based on what was provided in `<input_document>`.
 
    - Read the work document completely
    - Treat the plan as a decision artifact, not an execution script
-   - If the plan includes sections such as `Implementation Units`, `Work Breakdown`, `Requirements Trace`, `Files`, `Test Scenarios`, or `Verification`, use those as the primary source material for execution
+   - If the plan includes sections such as `Implementation Units`, `Work Breakdown`, `Requirements` (or legacy `Requirements Trace`), `Files`, `Test Scenarios`, or `Verification`, use those as the primary source material for execution
    - Check for `Execution note` on each implementation unit — these carry the plan's execution posture signal for that unit (for example, test-first or characterization-first). Note them when creating tasks.
    - Check for a `Deferred to Implementation` or `Implementation-Time Unknowns` section — these are questions the planner intentionally left for you to resolve during execution. Note them before starting so they inform your approach rather than surprising you mid-task
    - Check for a `Scope Boundaries` section — these are explicit non-goals. Refer back to them if implementation starts pulling you toward adjacent work
